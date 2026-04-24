@@ -2,17 +2,12 @@ import logging
 import yaml
 import time
 import random
-import json
-import base64
 import torch
 
 from data.loader import make_client_loaders
 from gossip.node import GossipNode
 from gossip.protocol import GossipProtocol
 from utils.weights import model_to_weight_arrays
-
-
-REGISTRY_FILE = "client_registry.json"
 
 
 def setup_logging(config):
@@ -29,25 +24,6 @@ def setup_logging(config):
 def load_config(path="config.yaml"):
     with open(path, "r") as f:
         return yaml.safe_load(f)
-
-
-def save_public_keys_to_json(nodes, path):
-    registry = {
-        node.client_id: base64.b64encode(node.pk).decode("utf-8")
-        for node in nodes
-    }
-    with open(path, "w") as f:
-        json.dump(registry, f, indent=2)
-    logging.info(f"Public key registry saved to {path}")
-
-
-def load_public_keys_from_json(path):
-    with open(path, "r") as f:
-        registry = json.load(f)
-    return {
-        cid: base64.b64decode(pk.encode("utf-8"))
-        for cid, pk in registry.items()
-    }
 
 
 def choose_aggregator_node(nodes):
@@ -93,11 +69,6 @@ def main():
     GOSSIP_FANOUT = config["gossip"]["fanout"]
     GOSSIP_MAX_HOPS = config["gossip"]["max_hops"]
 
-    USE_HASH = config["security"]["use_hash"]
-    HASH_ALGO = config["security"]["hash_algorithm"]
-
-    CRYPTO_SCHEME = config["crypto"]["scheme"]
-
     LEARNING_RATE = config["training"]["learning_rate"]
 
     MODEL = config["model"]
@@ -126,11 +97,8 @@ def main():
             client_id=f"client_{i}",
             dataloader=client_loaders[i],
             device=device,
-            use_hash=USE_HASH,
             learning_rate=LEARNING_RATE,
-            crypto_scheme=CRYPTO_SCHEME,
             model_name=MODEL["name"],
-            hash_algorithm=HASH_ALGO,
             weight_dtype=WEIGHTS["dtype"],
             input_channels=MODEL["input_channels"],
             num_classes=MODEL["num_classes"],
@@ -142,16 +110,11 @@ def main():
         )
         nodes.append(node)
 
-    # -------- REGISTRY --------
-    save_public_keys_to_json(nodes, REGISTRY_FILE)
-    all_pub_keys = load_public_keys_from_json(REGISTRY_FILE)
-
     # -------- GOSSIP --------
+    # No Dilithium, no public keys, no ZKP.
     gossip = GossipProtocol(
         fanout=GOSSIP_FANOUT,
         max_hops=GOSSIP_MAX_HOPS,
-        all_pub_keys=all_pub_keys,
-        crypto_scheme=CRYPTO_SCHEME,
     )
 
     # -------- INITIAL MODEL SYNC --------
@@ -168,25 +131,24 @@ def main():
         logging.info(f"Round {r}/{N_ROUNDS}")
         logging.info("=" * 60)
 
-        # clear stale state before round
         clear_round_state(nodes, gossip)
 
-        # 1. local training
+        # 1. Local training
         for node in nodes:
             node.local_train(None, epochs=LOCAL_EPOCHS)
 
-        # 2. sign updates
+        # 2. Prepare plain updates without Dilithium/ZKP
         for node in nodes:
-            node.sign_update()
+            node.prepare_update()
 
-        # 3. gossip propagation
+        # 3. Gossip propagation
         gossip.run_round(nodes)
 
-        # 4. choose aggregator
+        # 4. Choose aggregator
         aggregator = choose_aggregator_node(nodes)
         subs = aggregator.get_all_submissions()
 
-        # 5. aggregate
+        # 5. Aggregate
         if len(subs) == N_CLIENTS:
             logging.info(
                 f"[{aggregator.client_id}] aggregating complete round "
@@ -201,14 +163,13 @@ def main():
         if len(subs) > 0:
             aggregator.aggregate_local_updates(subs, aggregator.client.model)
 
-            # 6. sync aggregated weights to all nodes
             weights = model_to_weight_arrays(aggregator.client.model)
             sync_weights_to_all_nodes(nodes, weights)
+
             logging.info(f"Round {r} aggregated model synced to all nodes")
         else:
             logging.warning(f"Round {r} skipped because no submissions were available")
 
-        # clear state after round also
         clear_round_state(nodes, gossip)
 
     end_time = time.time()

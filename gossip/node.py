@@ -9,7 +9,11 @@ from utils.weights import bytes_to_weight_arrays, apply_weight_arrays
 class GossipNode:
     """
     A GossipNode = FederatedClient + gossip inbox.
-    Stores one unique submission per originating client.
+    Baseline version:
+    - No Dilithium
+    - No ZKP
+    - Keeps gossip communication
+    - Keeps decentralized aggregation
     """
 
     def __init__(
@@ -17,11 +21,8 @@ class GossipNode:
         client_id: str,
         dataloader: DataLoader,
         device: str,
-        use_hash: bool,
-        hash_algorithm: str,
         weight_dtype: str,
         learning_rate: float,
-        crypto_scheme: str,
         model_name: str,
         input_channels: int,
         num_classes: int,
@@ -35,11 +36,8 @@ class GossipNode:
             client_id=client_id,
             dataloader=dataloader,
             device=device,
-            use_hash=use_hash,
-            hash_algorithm=hash_algorithm,
             weight_dtype=weight_dtype,
             learning_rate=learning_rate,
-            crypto_scheme=crypto_scheme,
             model_name=model_name,
             input_channels=input_channels,
             num_classes=num_classes,
@@ -51,38 +49,38 @@ class GossipNode:
         )
 
         self.client_id = client_id
-        self.pk = self.client.pk
 
         self.own_submission: dict | None = None
         self.inbox: dict[str, dict] = {}
 
         logging.info(
             f"[{self.client_id}] gossip node initialized | "
-            f"use_hash={use_hash} hash_algorithm={hash_algorithm} "
             f"weight_dtype={weight_dtype} learning_rate={learning_rate} "
-            f"scheme={crypto_scheme} model={model_name}"
+            f"model={model_name}"
         )
 
     def local_train(self, global_weight_arrays: list | None, epochs: int = 1):
         self.client.local_train(global_weight_arrays, epochs)
 
-    def sign_update(self) -> dict:
-        self.own_submission = self.client.sign_update()
+    def prepare_update(self) -> dict:
+        """
+        Creates a normal model update without Dilithium signature or ZKP proof.
+        """
+        self.own_submission = self.client.prepare_update()
         self.inbox.clear()
-        logging.info(f"[{self.client_id}] own submission stored and inbox reset")
+
+        logging.info(f"[{self.client_id}] plain update prepared and inbox reset")
         return self.own_submission
 
     def receive_gossip(self, message: dict):
         origin_id = message["client_id"]
 
-        # ignore own message returning back
         if origin_id == self.client_id:
             logging.warning(
                 f"[{self.client_id}] ignored returned own gossip from {origin_id}"
             )
             return
 
-        # keep only one message per originating client
         if origin_id in self.inbox:
             logging.warning(
                 f"[{self.client_id}] duplicate gossip ignored from {origin_id}"
@@ -90,6 +88,7 @@ class GossipNode:
             return
 
         self.inbox[origin_id] = message
+
         logging.info(
             f"[{self.client_id}] received gossip from {origin_id} "
             f"| inbox_size={len(self.inbox)}"
@@ -133,4 +132,5 @@ class GossipNode:
         ]
 
         apply_weight_arrays(self.client.model, averaged)
+
         logging.info(f"[{self.client_id}] local aggregation completed")
