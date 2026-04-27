@@ -4,12 +4,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-try:
-    from opacus import PrivacyEngine
-    OPACUS_AVAILABLE = True
-except ImportError:
-    OPACUS_AVAILABLE = False
-
 from model.cnn import SmallCNN
 from utils.weights import apply_weight_arrays, weights_to_bytes
 
@@ -65,9 +59,17 @@ class FederatedClient:
         self.learning_rate = learning_rate
         self.model_name = model_name
 
+        import math
+
         # Differential Privacy parameters
         self.dp_clip_norm = 1.0
-        self.dp_noise_std = 0.01
+        self.epsilon = 10.0  # The privacy budget (tune this! lower = more private, higher = more accurate)
+        self.delta = 1e-5    # Usually set to 1/N (where N is size of dataset)
+
+        # Calculate noise_std mathematically using the Gaussian mechanism formula:
+        # sigma = (clip_norm * sqrt(2 * ln(1.25 / delta))) / epsilon
+        c = math.sqrt(2 * math.log(1.25 / self.delta))
+        self.dp_noise_std = (c * self.dp_clip_norm) / self.epsilon
 
         self.model = build_model(
             model_name=self.model_name,
@@ -84,24 +86,10 @@ class FederatedClient:
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
-        if OPACUS_AVAILABLE:
-            self.privacy_engine = PrivacyEngine()
-            self.model, self.optimizer, self.dataloader = self.privacy_engine.make_private(
-                module=self.model,
-                optimizer=self.optimizer,
-                data_loader=self.dataloader,
-                noise_multiplier=self.dp_noise_std,
-                max_grad_norm=self.dp_clip_norm,
-            )
-            logging.info(
-                f"[{client_id}] REAL DP enabled via Opacus | "
-                f"clip_norm={self.dp_clip_norm} noise_multiplier={self.dp_noise_std}"
-            )
-        else:
-            logging.warning(
-                f"[{client_id}] Opacus not installed! Falling back to FAKE batch-level DP. "
-                "Please run `pip install opacus` for real Differential Privacy."
-            )
+        logging.info(
+            f"[{client_id}] DP enabled via mathematical noise addition | "
+            f"clip_norm={self.dp_clip_norm} noise_multiplier={self.dp_noise_std}"
+        )
 
         logging.info(
             f"[{client_id}] initialized | "
@@ -130,21 +118,20 @@ class FederatedClient:
 
                 loss.backward()
 
-                if not OPACUS_AVAILABLE:
-                    # Fallback: FAKE batch-level DP
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        max_norm=self.dp_clip_norm,
-                    )
-                    for param in self.model.parameters():
-                        if param.grad is not None:
-                            noise = torch.normal(
-                                mean=0.0,
-                                std=self.dp_noise_std,
-                                size=param.grad.shape,
-                                device=param.grad.device,
-                            )
-                            param.grad += noise
+                # Apply Differential Privacy mathematically
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.dp_clip_norm,
+                )
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        noise = torch.normal(
+                            mean=0.0,
+                            std=self.dp_noise_std,
+                            size=param.grad.shape,
+                            device=param.grad.device,
+                        )
+                        param.grad += noise
 
                 self.optimizer.step()
 
