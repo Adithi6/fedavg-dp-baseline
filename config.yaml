@@ -1,6 +1,6 @@
 experiment:
-  n_clients: 5
-  n_rounds: 3
+  n_clients: 10
+  n_rounds: 15
   local_epochs: 1
 
 gossip:

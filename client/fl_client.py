@@ -63,7 +63,7 @@ class FederatedClient:
 
         # Differential Privacy parameters
         self.dp_clip_norm = 1.0
-        self.epsilon = 10.0  # The privacy budget (tune this! lower = more private, higher = more accurate)
+        self.epsilon = 5.0   # Fine-tuned privacy budget (Balanced: strong privacy, decent accuracy)
         self.delta = 1e-5    # Usually set to 1/N (where N is size of dataset)
 
         # Calculate noise_std mathematically using the Gaussian mechanism formula:
@@ -98,6 +98,9 @@ class FederatedClient:
         )
 
     def local_train(self, global_weight_arrays=None, epochs=1):
+        import time
+        start_time = time.time()
+
         if global_weight_arrays is not None:
             apply_weight_arrays(self.model, global_weight_arrays)
 
@@ -144,9 +147,13 @@ class FederatedClient:
                     )
 
         total_batches = len(self.dataloader) * epochs
+        end_time = time.time()
+        training_time = end_time - start_time
+
         logging.info(
             f"[{self.client_id}] trained with DP | "
-            f"loss: {total_loss / total_batches:.4f}"
+            f"loss: {total_loss / total_batches:.4f} | "
+            f"time: {training_time:.2f}s"
         )
 
     def prepare_update(self) -> dict:
@@ -156,13 +163,25 @@ class FederatedClient:
         No ZKP.
         DP is applied during local training.
         """
+        import time
+        import sys
+        start_time = time.time()
+
         update_bytes = weights_to_bytes(self.model, self.weight_dtype)
 
-        logging.info(
-            f"[{self.client_id}] update prepared | size={len(update_bytes)/1024:.1f} KB"
-        )
-
-        return {
+        payload = {
             "client_id": self.client_id,
             "update_bytes": update_bytes,
         }
+        
+        # Approximate size of the whole payload being sent over the network
+        payload_size_kb = (sys.getsizeof(self.client_id) + sys.getsizeof(update_bytes)) / 1024.0
+
+        end_time = time.time()
+        prep_time = end_time - start_time
+
+        logging.info(
+            f"[{self.client_id}] update prepared | payload_size={payload_size_kb:.2f} KB | prep_time={prep_time:.4f}s"
+        )
+
+        return payload

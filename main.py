@@ -54,6 +54,20 @@ def clear_round_state(nodes, gossip):
     gossip.reset_round()
 
 
+def evaluate_model(model, test_loader, device):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for x, y in test_loader:
+            x, y = x.to(device), y.to(device)
+            logits = model(x)
+            pred = torch.argmax(logits, dim=1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
+    return correct / total if total > 0 else 0.0
+
+
 def main():
     config = load_config()
     setup_logging(config)
@@ -76,7 +90,7 @@ def main():
     WEIGHTS = config["weights"]
 
     # -------- DATA --------
-    client_loaders, _ = make_client_loaders(
+    client_loaders, test_loader = make_client_loaders(
         n_clients=N_CLIENTS,
         batch_size=DATA["batch_size"],
         alpha=DATA["alpha"],
@@ -165,6 +179,9 @@ def main():
 
             weights = model_to_weight_arrays(aggregator.client.model)
             sync_weights_to_all_nodes(nodes, weights)
+
+            accuracy = evaluate_model(aggregator.client.model, test_loader, device)
+            logging.info(f"Round {r} global test accuracy: {accuracy * 100:.2f}%")
 
             logging.info(f"Round {r} aggregated model synced to all nodes")
         else:
